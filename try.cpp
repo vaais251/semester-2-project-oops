@@ -24,18 +24,15 @@ public:
           const string& op = "", const string& label = "") 
         : data(data_val), grad(0.0), _op(op), label(label), _is_heap_allocated(false)
     {
-        // Add all children to _prev
         for (Value* child : children) {
             _prev.push_back(child);
         }
-        
-        // Default backward function does nothing
         _backward = [](){};
     }
     
     // Destructor
     ~Value() {
-        // Nothing special needed here
+        // Nothing special needed here for now
     }
     
     // For printing the value
@@ -54,95 +51,75 @@ public:
     // Addition operator
     Value* operator+(Value& other) {
         Value* out = Value::create(this->data + other.data, {this, &other}, "+");
-        
-        // Define the backward function (now using pointers)
         out->_backward = [this, &other, out]() {
             this->grad += 1.0 * out->grad;
             other.grad += 1.0 * out->grad;
         };
-        
         return out;
     }
     
     // Multiplication operator
     Value* operator*(Value& other) {
         Value* out = Value::create(this->data * other.data, {this, &other}, "*");
-        
-        // Define the backward function
         out->_backward = [this, &other, out]() {
             this->grad += other.data * out->grad;
             other.grad += this->data * out->grad;
         };
-        
         return out;
     }
     
     // Power operator
     Value* pow(double exponent) {
         Value* out = Value::create(std::pow(this->data, exponent), {this}, "**" + to_string(exponent));
-        
-        // Define the backward function
         out->_backward = [this, exponent, out]() {
             this->grad += exponent * std::pow(this->data, exponent - 1) * out->grad;
         };
-        
         return out;
     }
     
     // Division operator (self / other)
     Value* operator/(Value& other) {
         // Division is self * other^(-1)
-        return *this * (*other.pow(-1.0));
+        return *this * *(other.pow(-1.0));
     }
     
     // Negation operator (-self)
     Value* operator-() {
-        // Create a constant Value for -1
         Value neg_one(-1.0);
         return neg_one * (*this);
     }
     
     // Subtraction operator (self - other)
     Value* operator-(Value& other) {
-        // Subtraction is self + (-other)
         return *this + (*(-other));
     }
     
-    // Hyperbolic tangent (tanh) activation function
+    // Hyperbolic tangent activation
     Value* tanh() {
         double x = this->data;
         double t = (std::exp(2*x) - 1) / (std::exp(2*x) + 1);
         Value* out = Value::create(t, {this}, "tanh");
-        
-        // Define the backward function
         out->_backward = [this, t, out]() {
             this->grad += (1 - t*t) * out->grad;
         };
-        
         return out;
     }
     
-    // Exponential function (e^x)
+    // Exponential function
     Value* exp() {
         double x = this->data;
         double result = std::exp(x);
         Value* out = Value::create(result, {this}, "exp");
-        
-        // Define the backward function
         out->_backward = [this, out]() {
             this->grad += out->data * out->grad;
         };
-        
         return out;
     }
     
-    // Backward method to perform backpropagation
+    // Backward pass to compute gradients
     void backward() {
-        // Stores nodes in topological order
         vector<Value*> topo;
         unordered_set<Value*> visited;
-        
-        // Helper function to build topological ordering (recursive DFS)
         function<void(Value*)> build_topo = [&](Value* v) {
             if (visited.find(v) == visited.end()) {
                 visited.insert(v);
@@ -152,28 +129,19 @@ public:
                 topo.push_back(v);
             }
         };
-        
-        // Build the topological ordering starting from this node
         build_topo(this);
-        
-        // Initialize gradient of output to 1.0
         this->grad = 1.0;
-        
-        // Backpropagate in reverse topological order
         reverse(topo.begin(), topo.end());
         for (Value* node : topo) {
             node->_backward();
         }
     }
     
-    // Helper function to clean up the entire computation graph
+    // Cleanup helper to delete all heap allocated nodes reachable from root
     static void cleanup_graph(Value* root) {
         if (!root) return;
-        
-        // Collect all nodes in the graph
         vector<Value*> nodes;
         unordered_set<Value*> visited;
-        
         function<void(Value*)> collect_nodes = [&](Value* v) {
             if (visited.find(v) == visited.end()) {
                 visited.insert(v);
@@ -185,10 +153,7 @@ public:
                 }
             }
         };
-        
         collect_nodes(root);
-        
-        // Delete all heap-allocated nodes
         for (Value* node : nodes) {
             delete node;
         }
@@ -196,107 +161,135 @@ public:
 };
 
 class Neuron {
-private:
-    vector<Value*> w; // Store pointers to Value objects
+public:
+    vector<Value*> w;
     Value* b;
 
-public:
-    // Constructor - initialize with 'nin' input neurons
     Neuron(int nin) {
-        // Initialize weights and bias with random values between -1 and 1
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_real_distribution<> dis(-1.0, 1.0);
-        
-        for (int i = 0; i < nin; i++) {
-            w.push_back(new Value(dis(gen)));
+        random_device rd;
+        mt19937 gen(rd());
+        uniform_real_distribution<> dis(-1.0, 1.0);
+        for (int i = 0; i < nin; ++i) {
+            w.push_back(Value::create(dis(gen)));
         }
-        b = new Value(dis(gen));
-    }
-    
-    // Destructor to properly clean up memory
-    ~Neuron() {
-        // Cleanup all weights and bias
-        for (auto& weight : w) {
-            delete weight;
-        }
-        delete b;
+        b = Value::create(dis(gen));
     }
 
-    // Forward pass - equivalent to __call__ in Python
-    Value* operator()(vector<Value*>& x) {
-        // w * x + b
-        Value* act = b; // Start with bias
-        
-        for (size_t i = 0; i < w.size() && i < x.size(); i++) {
-            // Use w[i] and x[i] which are both pointers
-            Value* product = *w[i] * *x[i];
-            Value* sum = *act + *product;
-            act = sum; // Store the pointer
+    Value* operator()(const vector<Value*>& x) {
+        Value* act = b;
+        for (size_t i = 0; i < w.size(); ++i) {
+            Value* prod = *w[i] * *x[i];
+            Value* new_act = *act + *prod;
+            act = new_act;
         }
-        
-        // Apply tanh activation function
-        Value* out = act->tanh();
+        return act->tanh();
+    }
+
+    vector<Value*> parameters() {
+        vector<Value*> params = w;
+        params.push_back(b);
+        return params;
+    }
+
+    ~Neuron() {
+        for (Value* weight : w) {
+            if (weight->_is_heap_allocated) delete weight;
+        }
+        if (b->_is_heap_allocated) delete b;
+    }
+};
+
+class Layer {
+public:
+    vector<Neuron*> neurons;
+
+    Layer(int nin, int nout) {
+        for (int i = 0; i < nout; ++i) {
+            neurons.push_back(new Neuron(nin));
+        }
+    }
+
+    vector<Value*> operator()(const vector<Value*>& x) {
+        vector<Value*> outs;
+        for (Neuron* n : neurons) {
+            outs.push_back((*n)(x));
+        }
+        return outs;
+    }
+
+    vector<Value*> parameters() {
+        vector<Value*> params;
+        for (Neuron* n : neurons) {
+            vector<Value*> n_params = n->parameters();
+            params.insert(params.end(), n_params.begin(), n_params.end());
+        }
+        return params;
+    }
+
+    ~Layer() {
+        for (Neuron* n : neurons) {
+            delete n;
+        }
+    }
+};
+
+class MLP {
+public:
+    vector<Layer> layers;
+
+    MLP(int nin, const vector<int>& nouts) {
+        vector<int> sizes = {nin};
+        sizes.insert(sizes.end(), nouts.begin(), nouts.end());
+        for (size_t i = 0; i < nouts.size(); ++i) {
+            layers.emplace_back(Layer(sizes[i], sizes[i+1]));
+        }
+    }
+
+    vector<Value*> operator()(const vector<Value*>& x) {
+        vector<Value*> out = x;
+        for (Layer& layer : layers) {
+            out = layer(out);
+        }
         return out;
     }
 
-    // Return all parameters for optimization
     vector<Value*> parameters() {
         vector<Value*> params;
-        for (auto& weight : w) {
-            params.push_back(weight); // Already a pointer
+        for (Layer& layer : layers) {
+            vector<Value*> layer_params = layer.parameters();
+            params.insert(params.end(), layer_params.begin(), layer_params.end());
         }
-        params.push_back(b); // Already a pointer
         return params;
     }
 };
 
-
 int main() {
-    
-    
-    // Test case for Neuron class
-    cout << "\n=== Neuron test ===\n" << endl;
-    
-    // Create a neuron with 3 inputs
-    Neuron neuron(3);
-    
-    // Create input values as pointers now
-    vector<Value*> x = {
-        new Value(0.5), 
-        new Value(-0.5), 
-        new Value(1.0)
-    };
-    
-    // Forward pass through the neuron
-    Value* output = neuron(x);
-    
-    cout << "Neuron output: " << output->data << endl;
-    
-    // Backpropagation through the neuron
-    output->backward();
-    
-    // Get parameters for inspection
-    vector<Value*> params = neuron.parameters();
-    
-    cout << "Parameter gradients:" << endl;
-    for (size_t i = 0; i < params.size(); i++) {
-        if (i < params.size() - 1) {
-            cout << "  Weight " << i << ": data=" << params[i]->data 
-                 << ", grad=" << params[i]->grad << endl;
-        } else {
-            cout << "  Bias: data=" << params[i]->data 
-                 << ", grad=" << params[i]->grad << endl;
-        }
+    Value* in1 = Value::create(1.0);
+    Value* in2 = Value::create(2.0);
+    vector<Value*> input = {in1, in2};
+
+    MLP mlp(2, {3, 1});  // 2 inputs -> hidden layer with 3 neurons -> output layer with 1 neuron
+    vector<Value*> out = mlp(input);
+
+    // Backpropagate from output
+    out[0]->backward();
+
+    cout << "Output: " << out[0]->data << endl;
+    cout << "Input gradients: in1.grad=" << in1->grad << ", in2.grad=" << in2->grad << endl;
+
+    vector<Value*> params = mlp.parameters();
+    for (size_t i = 0; i < params.size(); ++i) {
+        cout << "param[" << i << "] = " << params[i]->data
+             << ", grad = " << params[i]->grad << endl;
     }
-    
-    // Clean up the computation graph
-    Value::cleanup_graph(output);
-    
-    // Clean up input values
-    for (auto* val : x) {
-        delete val;
+
+    // Clean up dynamically allocated Values
+    for (Value* p : params) {
+        if (p->_is_heap_allocated) delete p;
     }
-    
+    delete in1;
+    delete in2;
+    Value::cleanup_graph(out[0]);
+
     return 0;
 }
