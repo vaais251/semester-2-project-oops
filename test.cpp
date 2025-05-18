@@ -251,6 +251,49 @@ public:
     }
 };
 
+class Layer {
+private:
+    vector<Neuron*> neurons;
+
+public:
+    // Constructor - initialize with nin inputs and nout outputs
+    Layer(int nin, int nout) {
+        for (int i = 0; i < nout; i++) {
+            neurons.push_back(new Neuron(nin));
+        }
+    }
+    
+    // Destructor to properly clean up memory
+    ~Layer() {
+        for (auto& neuron : neurons) {
+            delete neuron;
+        }
+    }
+
+    // Forward pass - equivalent to __call__ in Python
+    vector<Value*> operator()(vector<Value*>& x) {
+        vector<Value*> outs;
+        for (auto& neuron : neurons) {
+            outs.push_back((*neuron)(x));
+        }
+        
+        // If there's only one output, return it directly
+        // But since C++ can't do this kind of type switching like Python,
+        // we'll just return the vector and let the user handle it
+        return outs;
+    }
+
+    // Return all parameters for optimization
+    vector<Value*> parameters() {
+        vector<Value*> params;
+        for (auto& neuron : neurons) {
+            vector<Value*> neuron_params = neuron->parameters();
+            params.insert(params.end(), neuron_params.begin(), neuron_params.end());
+        }
+        return params;
+    }
+};
+
 
 int main() {
     
@@ -295,6 +338,50 @@ int main() {
     
     // Clean up input values
     for (auto* val : x) {
+        delete val;
+    }
+    
+    // Test case for Layer class
+    cout << "\n=== Layer test ===\n" << endl;
+    
+    // Create a layer with 3 inputs and 2 outputs
+    Layer layer(3, 2);
+    
+    // Create input values
+    vector<Value*> x_layer = {
+        new Value(0.8), 
+        new Value(-0.2), 
+        new Value(0.5)
+    };
+    
+    // Forward pass through the layer
+    vector<Value*> outputs = layer(x_layer);
+    
+    cout << "Layer outputs:" << endl;
+    for (size_t i = 0; i < outputs.size(); i++) {
+        cout << "  Neuron " << i << ": " << outputs[i]->data << endl;
+    }
+    
+    // Backpropagation through one of the outputs
+    outputs[0]->backward();
+    
+    // Get parameters for inspection
+    vector<Value*> layer_params = layer.parameters();
+    
+    cout << "Layer has " << layer_params.size() << " parameters" << endl;
+    cout << "First few parameter gradients:" << endl;
+    for (size_t i = 0; i < min(size_t(5), layer_params.size()); i++) {
+        cout << "  Param " << i << ": data=" << layer_params[i]->data 
+             << ", grad=" << layer_params[i]->grad << endl;
+    }
+    
+    // Clean up the computation graph
+    for (auto* output : outputs) {
+        Value::cleanup_graph(output);
+    }
+    
+    // Clean up input values
+    for (auto* val : x_layer) {
         delete val;
     }
     
