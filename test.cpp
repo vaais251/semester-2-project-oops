@@ -294,6 +294,47 @@ public:
     }
 };
 
+class MLP {
+private:
+    vector<Layer*> layers;
+
+public:
+    // Constructor - initialize with input size and a vector of output sizes for each layer
+    MLP(int nin, const vector<int>& nouts) {
+        vector<int> sizes = {nin};
+        sizes.insert(sizes.end(), nouts.begin(), nouts.end());
+        
+        for (size_t i = 0; i < nouts.size(); i++) {
+            layers.push_back(new Layer(sizes[i], sizes[i+1]));
+        }
+    }
+    
+    // Destructor to properly clean up memory
+    ~MLP() {
+        for (auto& layer : layers) {
+            delete layer;
+        }
+    }
+    
+    // Forward pass - equivalent to __call__ in Python
+    vector<Value*> operator()(vector<Value*>& x) {
+        vector<Value*> activations = x;
+        for (auto& layer : layers) {
+            activations = (*layer)(activations);
+        }
+        return activations;
+    }
+    
+    // Return all parameters for optimization
+    vector<Value*> parameters() {
+        vector<Value*> params;
+        for (auto& layer : layers) {
+            vector<Value*> layer_params = layer->parameters();
+            params.insert(params.end(), layer_params.begin(), layer_params.end());
+        }
+        return params;
+    }
+};
 
 int main() {
     
@@ -382,6 +423,55 @@ int main() {
     
     // Clean up input values
     for (auto* val : x_layer) {
+        delete val;
+    }
+    
+    // Test case for MLP class
+    cout << "\n=== MLP test ===\n" << endl;
+    
+    // Create an MLP with 3 inputs, a hidden layer of 4 neurons, and 2 outputs
+    MLP mlp(3, {4, 2});
+    
+    // Create input values
+    vector<Value*> x_mlp = {
+        new Value(0.2), 
+        new Value(0.1), 
+        new Value(-0.3)
+    };
+    
+    // Forward pass through the MLP
+    vector<Value*> mlp_outputs = mlp(x_mlp);
+    
+    cout << "MLP outputs:" << endl;
+    for (size_t i = 0; i < mlp_outputs.size(); i++) {
+        cout << "  Output " << i << ": " << mlp_outputs[i]->data << endl;
+    }
+    
+    // Backpropagation through the MLP (setting gradient for both outputs)
+    for (auto* output : mlp_outputs) {
+        output->grad = 1.0;  // Setting gradient for all outputs
+    }
+    
+    // Only backward on the first output to see how gradients flow
+    mlp_outputs[0]->backward();
+    
+    // Get parameters for inspection
+    vector<Value*> mlp_params = mlp.parameters();
+    
+    cout << "MLP has " << mlp_params.size() << " parameters" << endl;
+    cout << "First few parameter gradients:" << endl;
+    for (size_t i = 0; i < min(size_t(5), mlp_params.size()); i++) {
+        cout << "  Param " << i << ": data=" << mlp_params[i]->data 
+             << ", grad=" << mlp_params[i]->grad << endl;
+    }
+    
+    // Clean up the computation graph
+    for (auto* output : mlp_outputs) {
+        Value::cleanup_graph(output);
+    }
+    
+    // Clean up input values
+    for (auto* val : x_mlp) {
         delete val;
     }
     
