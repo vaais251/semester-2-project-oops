@@ -20,6 +20,7 @@ public:
     string _op;
     string label;
     bool _is_heap_allocated;
+    static vector<Value*> computation_graph; // Track all created values
 
     Value(double data_val, const vector<Value*>& children = {}, 
           const string& op = "", const string& label = "") 
@@ -28,21 +29,20 @@ public:
         for (Value* child : children) {
             _prev.push_back(child);
         }
-        
         _backward = [](){};
     }
     
-    ~Value() {
-    }
+    ~Value() {}
     
     void print() const {
-        cout << "Value(data=" << data << ")" << endl;
+        cout << "Value(data=" << data << ", grad=" << grad << ")" << endl;
     }
     
     static Value* create(double data_val, const vector<Value*>& children = {}, 
                          const string& op = "", const string& label = "") {
         Value* v = new Value(data_val, children, op, label);
         v->_is_heap_allocated = true;
+        computation_graph.push_back(v);
         return v;
     }
     
@@ -83,8 +83,8 @@ public:
     }
     
     Value* operator-() {
-        Value neg_one(-1.0);
-        return neg_one * (*this);
+        Value* neg_one = Value::create(-1.0);
+        return *neg_one * *this;
     }
     
     Value* operator-(Value& other) {
@@ -98,6 +98,17 @@ public:
         
         out->_backward = [this, t, out]() {
             this->grad += (1 - t*t) * out->grad;
+        };
+        
+        return out;
+    }
+    
+    Value* relu() {
+        double result = max(0.0, this->data);
+        Value* out = Value::create(result, {this}, "relu");
+        
+        out->_backward = [this, out]() {
+            this->grad += (this->data > 0 ? 1.0 : 0.0) * out->grad;
         };
         
         return out;
@@ -139,31 +150,21 @@ public:
         }
     }
     
-    static void cleanup_graph(Value* root) {
-        if (!root) return;
-        
-        vector<Value*> nodes;
-        unordered_set<Value*> visited;
-        
-        function<void(Value*)> collect_nodes = [&](Value* v) {
-            if (visited.find(v) == visited.end()) {
-                visited.insert(v);
-                for (Value* child : v->_prev) {
-                    collect_nodes(child);
-                }
-                if (v->_is_heap_allocated) {
-                    nodes.push_back(v);
-                }
-            }
-        };
-        
-        collect_nodes(root);
-        
-        for (Value* node : nodes) {
-            delete node;
+    static void clear_computation_graph() {
+        for (Value* v : computation_graph) {
+            delete v;
+        }
+        computation_graph.clear();
+    }
+    
+    static void zero_gradients() {
+        for (Value* v : computation_graph) {
+            v->grad = 0.0;
         }
     }
 };
+
+vector<Value*> Value::computation_graph;
 
 class Neuron {
 private:
@@ -174,12 +175,14 @@ public:
     Neuron(int nin) {
         random_device rd;
         mt19937 gen(rd());
+        // Improved Xavier initialization
         uniform_real_distribution<> dis(-1.0, 1.0);
+        double xavier_scale = sqrt(2.0 / nin); // Better for ReLU
         
         for (int i = 0; i < nin; i++) {
-            w.push_back(new Value(dis(gen)));
+            w.push_back(new Value(dis(gen) * xavier_scale));
         }
-        b = new Value(dis(gen));
+        b = new Value(0.0); // Start with zero bias
     }
     
     ~Neuron() {
@@ -198,8 +201,8 @@ public:
             act = sum;
         }
         
-        Value* out = act->tanh();
-        return out;
+        // Use ReLU for hidden layers (will be handled by Layer class)
+        return act;
     }
 
     vector<Value*> parameters() {
@@ -215,9 +218,10 @@ public:
 class Layer {
 private:
     vector<Neuron*> neurons;
+    bool is_output_layer;
 
 public:
-    Layer(int nin, int nout) {
+    Layer(int nin, int nout, bool output_layer = false) : is_output_layer(output_layer) {
         for (int i = 0; i < nout; i++) {
             neurons.push_back(new Neuron(nin));
         }
@@ -232,9 +236,16 @@ public:
     vector<Value*> operator()(vector<Value*>& x) {
         vector<Value*> outs;
         for (auto& neuron : neurons) {
-            outs.push_back((*neuron)(x));
+            Value* raw_output = (*neuron)(x);
+            // Apply activation function based on layer type
+            if (is_output_layer) {
+                // No activation for output layer (linear output for regression)
+                outs.push_back(raw_output);
+            } else {
+                // ReLU for hidden layers
+                outs.push_back(raw_output->relu());
+            }
         }
-        
         return outs;
     }
 
@@ -258,8 +269,15 @@ public:
         sizes.insert(sizes.end(), nouts.begin(), nouts.end());
         
         for (size_t i = 0; i < nouts.size(); i++) {
-            layers.push_back(new Layer(sizes[i], sizes[i+1]));
+            bool is_last_layer = (i == nouts.size() - 1);
+            layers.push_back(new Layer(sizes[i], sizes[i+1], is_last_layer));
         }
+        
+        cout << "Created MLP with architecture: " << nin;
+        for (auto size : nouts) {
+            cout << "-" << size;
+        }
+        cout << endl;
     }
     
     ~MLP() {
@@ -297,8 +315,7 @@ bool loadHousingDataCSV(const string& filename, vector<vector<double>>& X_data, 
     y_data.clear();
     
     string line;
-    
-    getline(csvFile, line);
+    getline(csvFile, line); // Skip header
     
     while (getline(csvFile, line)) {
         stringstream ss(line);
@@ -339,6 +356,7 @@ void normalizeData(vector<vector<double>>& X_data, vector<double>& y_data,
     y_mean = 0.0;
     y_std = 0.0;
     
+    // Calculate means
     for (int i = 0; i < num_samples; i++) {
         for (int j = 0; j < NUM_FEATURES; j++) {
             X_means[j] += X_data[i][j];
@@ -351,6 +369,7 @@ void normalizeData(vector<vector<double>>& X_data, vector<double>& y_data,
     }
     y_mean /= num_samples;
     
+    // Calculate standard deviations
     for (int i = 0; i < num_samples; i++) {
         for (int j = 0; j < NUM_FEATURES; j++) {
             X_stds[j] += pow(X_data[i][j] - X_means[j], 2);
@@ -360,11 +379,12 @@ void normalizeData(vector<vector<double>>& X_data, vector<double>& y_data,
     
     for (int j = 0; j < NUM_FEATURES; j++) {
         X_stds[j] = sqrt(X_stds[j] / num_samples);
-        if (X_stds[j] < 1e-5) X_stds[j] = 1.0;
+        if (X_stds[j] < 1e-8) X_stds[j] = 1.0; // Prevent division by zero
     }
     y_std = sqrt(y_std / num_samples);
-    if (y_std < 1e-5) y_std = 1.0;
+    if (y_std < 1e-8) y_std = 1.0;
     
+    // Normalize the data
     for (int i = 0; i < num_samples; i++) {
         for (int j = 0; j < NUM_FEATURES; j++) {
             X_data[i][j] = (X_data[i][j] - X_means[j]) / X_stds[j];
@@ -373,6 +393,7 @@ void normalizeData(vector<vector<double>>& X_data, vector<double>& y_data,
     }
     
     cout << "Data normalization complete" << endl;
+    cout << "Target mean: " << y_mean << ", Target std: " << y_std << endl;
 }
 
 void prepareTrainingData(const vector<vector<double>>& X_data, const vector<double>& y_data,
@@ -415,71 +436,100 @@ void trainModel(MLP& mlp,
     const int TRAIN_SIZE = X_train_vals.size();
     const int VAL_SIZE = X_val_vals.size();
     
-    const int EPOCHS = 50;
-    const double LEARNING_RATE = 0.01;
+    const int EPOCHS = 200;
+    const double INITIAL_LR = 0.01;
+    const double WEIGHT_DECAY = 1e-6;
     
     cout << "\nTraining model with " << EPOCHS << " epochs" << endl;
-    cout << "Epoch, Train Loss, Validation Loss" << endl;
+    cout << "Epoch, Train Loss, Validation Loss, Learning Rate" << endl;
     
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
+        // Learning rate decay
+        double learning_rate = INITIAL_LR * pow(0.995, epoch);
+        
+        // Clear gradients for all parameters
         vector<Value*> params = mlp.parameters();
         for (auto* p : params) {
             p->grad = 0.0;
         }
         
-        double train_loss = 0.0;
+        // Clear computation graph from previous epoch
+        Value::clear_computation_graph();
+        
+        double total_loss = 0.0;
+        
+        // Training loop
         for (int i = 0; i < TRAIN_SIZE; i++) {
             vector<Value*> pred = mlp(X_train_vals[i]);
             
-            double error = pred[0]->data - y_train_vals[i]->data;
-            train_loss += error * error;
+            // Calculate MSE loss
+            Value* diff = *pred[0] - *y_train_vals[i];
+            Value* loss = diff->pow(2.0);
+            total_loss += loss->data;
             
-            pred[0]->grad = 2.0 * error;
-            
-            pred[0]->backward();
-            
-            Value::cleanup_graph(pred[0]);
+            // Backward pass
+            loss->backward();
         }
         
-        train_loss /= TRAIN_SIZE;
+        double train_loss = total_loss / TRAIN_SIZE;
         
+        // Validation loss calculation
         double val_loss = 0.0;
-        if (epoch % 10 == 0 || epoch == EPOCHS - 1) {
+        if (epoch % 20 == 0 || epoch == EPOCHS - 1) {
+            Value::clear_computation_graph();
+            
             for (int i = 0; i < VAL_SIZE; i++) {
                 vector<Value*> pred = mlp(X_val_vals[i]);
-                double error = pred[0]->data - y_val_vals[i]->data;
-                val_loss += error * error;
-                
-                for (auto* p : pred) {
-                    if (p->_is_heap_allocated) {
-                        delete p;
-                    }
-                }
+                Value* diff = *pred[0] - *y_val_vals[i];
+                Value* loss = diff->pow(2.0);
+                val_loss += loss->data;
             }
             val_loss /= VAL_SIZE;
+            
+            Value::clear_computation_graph();
+        }
+        
+        // Parameter update with gradient clipping
+        double grad_norm = 0.0;
+        for (auto* p : params) {
+            grad_norm += p->grad * p->grad;
+        }
+        grad_norm = sqrt(grad_norm);
+        
+        double clip_value = 1.0;
+        if (grad_norm > clip_value) {
+            for (auto* p : params) {
+                p->grad *= clip_value / grad_norm;
+            }
         }
         
         for (auto* p : params) {
-            p->data -= LEARNING_RATE * p->grad;
+            p->data -= learning_rate * (p->grad + WEIGHT_DECAY * p->data);
         }
         
-        if (epoch % 10 == 0 || epoch == EPOCHS - 1) {
-            cout << epoch + 1 << ", " << train_loss << ", " << val_loss << endl;
+        if (epoch % 20 == 0 || epoch == EPOCHS - 1) {
+            cout << epoch + 1 << ", " << train_loss << ", " << val_loss 
+                 << ", " << learning_rate << endl;
         }
     }
     
-    cout << "\nPredictions on first 5 samples:" << endl;
-    cout << "Actual Price, Predicted Price" << endl;
+    // Final predictions
+    cout << "\nPredictions on first 5 training samples:" << endl;
+    cout << "Actual Price, Predicted Price, Error" << endl;
+    
+    Value::clear_computation_graph();
     
     for (int i = 0; i < 5 && i < TRAIN_SIZE; i++) {
         vector<Value*> pred = mlp(X_train_vals[i]);
         double predicted_price = pred[0]->data * y_std + y_mean;
         double actual_price = y_train_vals[i]->data * y_std + y_mean;
+        double error = abs(predicted_price - actual_price);
         
-        cout << "$" << actual_price << ", $" << predicted_price << endl;
-        
-        Value::cleanup_graph(pred[0]);
+        cout << "$" << (int)actual_price << ", $" << (int)predicted_price 
+             << ", $" << (int)error << endl;
     }
+    
+    Value::clear_computation_graph();
 }
 
 void cleanup(vector<vector<Value*>>& X_train_vals, vector<Value*>& y_train_vals,
@@ -544,12 +594,14 @@ int main() {
     prepareTrainingData(X_data, y_data, X_train_vals, y_train_vals, X_val_vals, y_val_vals);
     
     cout << "\nCreating neural network..." << endl;
-    MLP mlp(NUM_FEATURES, {8, 4, 1});
+    // Better architecture: 4 -> 16 -> 8 -> 1
+    MLP mlp(NUM_FEATURES, {16, 8, 1});
     
     trainModel(mlp, X_train_vals, y_train_vals, X_val_vals, y_val_vals, y_mean, y_std);
     
     cout << "\nCleaning up resources..." << endl;
     cleanup(X_train_vals, y_train_vals, X_val_vals, y_val_vals);
+    Value::clear_computation_graph();
     
     cout << "\nTraining complete." << endl;
     return 0;
